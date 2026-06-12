@@ -15,6 +15,64 @@ import (
 	"github.com/creack/pty"
 )
 
+// terminfoSearchDirs 返回 terminfo 数据库可能所在的目录（与 ncurses 查找顺序一致）。
+func terminfoSearchDirs() []string {
+	dirs := []string{}
+	if d := os.Getenv("TERMINFO"); d != "" {
+		dirs = append(dirs, d)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".terminfo"))
+	}
+	if d := os.Getenv("TERMINFO_DIRS"); d != "" {
+		for _, p := range strings.Split(d, ":") {
+			if p != "" {
+				dirs = append(dirs, p)
+			}
+		}
+	}
+	dirs = append(dirs,
+		"/etc/terminfo",
+		"/lib/terminfo",
+		"/usr/share/terminfo",
+		"/usr/lib/terminfo",
+		"/usr/local/share/terminfo",
+	)
+	return dirs
+}
+
+// terminfoExists 判断给定 TERM 名称在本机是否有对应的 terminfo 条目。
+// 条目通常位于 <dir>/<首字母>/<名称>，部分系统用十六进制目录 <dir>/<hex>/<名称>。
+func terminfoExists(name string) bool {
+	if name == "" {
+		return false
+	}
+	first := name[:1]
+	hexFirst := fmt.Sprintf("%x", name[0])
+	for _, dir := range terminfoSearchDirs() {
+		for _, sub := range []string{first, hexFirst} {
+			if _, err := os.Stat(filepath.Join(dir, sub, name)); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pickTerm 选择一个既支持 256 色、又不会触发 xterm 版本/能力探测级联的 TERM。
+// 在 TERM=xterm* 下，vim 等程序启动时会发探测序列（如 XTGETTCAP）并等待终端回应，
+// 而网页终端 xterm.js 不回应其中部分查询，导致 vim 卡死。screen/tmux 的 terminfo
+// 没有这些探测能力，可规避卡死并保留 256 色。优先使用本机已安装的条目；都不存在时
+// 回退到 xterm-256color（几乎必然存在，但此时可能仍需在被控机用 vimrc 禁用探测）。
+func pickTerm() string {
+	for _, candidate := range []string{"tmux-256color", "screen-256color"} {
+		if terminfoExists(candidate) {
+			return candidate
+		}
+	}
+	return "xterm-256color"
+}
+
 // newTerminalImpl 创建一个新的终端实例。
 // 它会尝试根据用户配置文件查找默认 shell，如果失败则回退到常见 shell。
 // 优先以交互模式启动 shell，如果不支持则回退到非交互模式。
@@ -76,12 +134,15 @@ func newTerminalImpl() (*terminalImpl, error) {
 
 	shellCmd := prefixCmd + "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
 
+	// 选择不会触发 xterm 探测级联、又支持 256 色的 TERM，避免 vim 等全屏程序在网页终端里卡死。
+	termEnv := pickTerm()
+
 	cmd := exec.Command(shell, "-c", shellCmd)
 	cmd.Args[0] = shellArgv0
 	cmd.Env = append(os.Environ(), // 继承系统环境变量
-		"TERM=xterm-256color", // 设置终端类型，提高兼容性
-		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
-		"LC_ALL=C.UTF-8",      // 强制所有本地化变量为 UTF-8
+		"TERM="+termEnv,  // 终端类型：优先 tmux/screen-256color，回退 xterm-256color
+		"LANG=C.UTF-8",   // 设置语言环境为 UTF-8
+		"LC_ALL=C.UTF-8", // 强制所有本地化变量为 UTF-8
 	)
 
 	tty, err := pty.Start(cmd)
@@ -89,7 +150,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 		// 回退到原始启动逻辑（直接启动 shell，再无参数）
 		cmd = exec.Command(shell)
 		cmd.Env = append(os.Environ(),
-			"TERM=xterm-256color",
+			"TERM="+termEnv,
 			"LANG=C.UTF-8",
 			"LC_ALL=C.UTF-8",
 		)
