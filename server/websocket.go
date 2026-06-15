@@ -391,6 +391,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			// Remote Exec
 			ExecCommand string `json:"command,omitempty"`
 			ExecTaskID  string `json:"task_id,omitempty"`
+			ExecTimeout int    `json:"timeout,omitempty"`
 			// Ping
 			PingTaskID uint   `json:"ping_task_id,omitempty"`
 			PingType   string `json:"ping_type,omitempty"`
@@ -411,7 +412,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			continue
 		}
 		if message.Message == "exec" {
-			go NewTask(message.ExecTaskID, message.ExecCommand)
+			go NewTask(message.ExecTaskID, message.ExecCommand, message.ExecTimeout)
 			continue
 		}
 		if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
@@ -430,9 +431,10 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		var p struct {
 			TaskID  string `json:"task_id"`
 			Command string `json:"command"`
+			Timeout int    `json:"timeout"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
-			go NewTask(p.TaskID, p.Command)
+			go NewTask(p.TaskID, p.Command, p.Timeout)
 			return true
 		} else {
 			log.Printf("bad v2 exec params: %v", err)

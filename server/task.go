@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
@@ -23,7 +24,7 @@ import (
 	ping "github.com/prometheus-community/pro-bing"
 )
 
-func NewTask(task_id, command string) {
+func NewTask(task_id, command string, timeoutSec int) {
 	if task_id == "" {
 		return
 	}
@@ -36,14 +37,17 @@ func NewTask(task_id, command string) {
 		return
 	}
 	log.Printf("Executing task %s with command: %s", task_id, command)
-	result, exitCode := runTaskCommand(command)
+	result, exitCode := runTaskCommand(task_id, command, timeoutSec)
 	uploadTaskResult(task_id, result, exitCode, time.Now())
 }
 
-func runTaskCommand(command string) (string, int) {
-	// 远程执行加超时：避免 `ping`、`top` 等永不退出的命令把任务挂死、留下孤儿进程。
-	// 超时会连同子进程组一起被杀（见 setupProcessGroup）；0 表示不限制。
-	timeout := time.Duration(flags.TaskExecTimeout) * time.Second
+func runTaskCommand(taskID, command string, timeoutSec int) (string, int) {
+	// 单条命令超时：未指定(<=0)则用 agent 默认 flags.TaskExecTimeout；最终为 0 表示不限制。
+	// 超时会连同子进程组一起被杀（见 setupProcessGroup），避免 ping/top 等挂死、留孤儿进程。
+	if timeoutSec <= 0 {
+		timeoutSec = flags.TaskExecTimeout
+	}
+	timeout := time.Duration(timeoutSec) * time.Second
 	ctx := context.Background()
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -57,17 +61,45 @@ func runTaskCommand(command string) (string, int) {
 	}
 	defer cleanup()
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// stdout/stderr 合并进一个并发安全缓冲，便于运行中增量上报「近实时」输出。
+	out := &lockedBuffer{}
+	cmd.Stdout = out
+	cmd.Stderr = out
 
-	err = cmd.Run()
-
-	result := stdout.String()
-	if stderr.Len() > 0 {
-		result = appendErrorResult(result, stderr.String())
+	if err := cmd.Start(); err != nil {
+		return err.Error(), -1
 	}
-	result = strings.ReplaceAll(result, "\r\n", "\n")
+
+	// 运行期间每 ~2s 把已产生的输出增量上报（仅在有变化时），前端轮询即可看到滚动增长。
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	if taskID != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			lastLen := -1
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					s := out.String()
+					if len(s) != lastLen {
+						lastLen = len(s)
+						uploadTaskProgress(taskID, normalizeOutput(s))
+					}
+				}
+			}
+		}()
+	}
+
+	err = cmd.Wait()
+	close(stop)
+	wg.Wait()
+
+	result := normalizeOutput(out.String())
 	exitCode := 0
 	switch {
 	case timeout > 0 && ctx.Err() == context.DeadlineExceeded:
@@ -84,6 +116,28 @@ func runTaskCommand(command string) (string, int) {
 	}
 
 	return result, exitCode
+}
+
+func normalizeOutput(s string) string {
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
+
+// lockedBuffer 是并发安全的输出缓冲：exec 的拷贝 goroutine 写、上报 goroutine 读。
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *lockedBuffer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *lockedBuffer) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 func buildTaskCommand(ctx context.Context, command string) (*exec.Cmd, func(), error) {
@@ -129,19 +183,30 @@ func appendErrorResult(result, err string) string {
 	return result + "\n" + err
 }
 
+// uploadTaskResult 上报最终结果（带 exit_code 与 finished_at，标记任务完成）。
 func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
-	payload := map[string]interface{}{
+	postTaskResult(map[string]interface{}{
 		"task_id":     taskID,
 		"result":      result,
 		"exit_code":   exitCode,
 		"finished_at": finishedAt,
-	}
+	}, flags.MaxRetries)
+}
 
+// uploadTaskProgress 上报进行中的增量输出（不带 exit_code / finished_at，服务端视为未完成）。
+// 尽力而为，不重试——下一个 tick 会再次上报最新输出。
+func uploadTaskProgress(taskID, result string) {
+	postTaskResult(map[string]interface{}{
+		"task_id": taskID,
+		"result":  result,
+	}, 0)
+}
+
+func postTaskResult(payload map[string]interface{}, maxRetry int) {
 	jsonData, _ := json.Marshal(payload)
 	endpoint := flags.Endpoint + "/api/clients/task/result?token=" + flags.Token
 
 	client := dnsresolver.GetHTTPClient(30 * time.Second)
-	maxRetry := flags.MaxRetries
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonData))
 		if err != nil {

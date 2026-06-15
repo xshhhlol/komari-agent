@@ -16,7 +16,7 @@ func TestRunTaskCommandMultilineUnix(t *testing.T) {
 		t.Skip("Unix shell script execution test")
 	}
 
-	result, exitCode := runTaskCommand("printf '%s\\n' first\nprintf '%s\\n' second\n")
+	result, exitCode := runTaskCommand("", "printf '%s\\n' first\nprintf '%s\\n' second\n", 0)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d with result %q", exitCode, result)
@@ -41,7 +41,7 @@ func TestRunTaskCommandEscapingAndWildcardsUnix(t *testing.T) {
 		"printf '\\n'",
 	}, "\n")
 
-	result, exitCode := runTaskCommand(command)
+	result, exitCode := runTaskCommand("", command, 0)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d with result %q", exitCode, result)
@@ -69,12 +69,9 @@ func TestRunTaskCommandTimeoutUnix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix timeout test")
 	}
-	old := flags.TaskExecTimeout
-	flags.TaskExecTimeout = 1
-	defer func() { flags.TaskExecTimeout = old }()
-
 	start := time.Now()
-	result, exitCode := runTaskCommand("echo KOMARI_START; sleep 30; echo KOMARI_DONE")
+	// 直接传入每条命令的超时（1s），不依赖 agent 默认 flag
+	result, exitCode := runTaskCommand("", "echo KOMARI_START; sleep 30; echo KOMARI_DONE", 1)
 	elapsed := time.Since(start)
 
 	if elapsed > 10*time.Second {
