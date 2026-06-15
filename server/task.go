@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -40,7 +41,17 @@ func NewTask(task_id, command string) {
 }
 
 func runTaskCommand(command string) (string, int) {
-	cmd, cleanup, err := buildTaskCommand(command)
+	// 远程执行加超时：避免 `ping`、`top` 等永不退出的命令把任务挂死、留下孤儿进程。
+	// 超时会连同子进程组一起被杀（见 setupProcessGroup）；0 表示不限制。
+	timeout := time.Duration(flags.TaskExecTimeout) * time.Second
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	cmd, cleanup, err := buildTaskCommand(ctx, command)
 	if err != nil {
 		return err.Error(), -1
 	}
@@ -58,7 +69,12 @@ func runTaskCommand(command string) (string, int) {
 	}
 	result = strings.ReplaceAll(result, "\r\n", "\n")
 	exitCode := 0
-	if err != nil {
+	switch {
+	case timeout > 0 && ctx.Err() == context.DeadlineExceeded:
+		// 超时被终止：保留已产生的输出，并补一行说明 + 约定的 124 退出码
+		result = appendErrorResult(result, fmt.Sprintf("[komari] command timed out after %s and was terminated", timeout))
+		exitCode = 124
+	case err != nil:
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
@@ -70,7 +86,7 @@ func runTaskCommand(command string) (string, int) {
 	return result, exitCode
 }
 
-func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
+func buildTaskCommand(ctx context.Context, command string) (*exec.Cmd, func(), error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		scriptFile, err := os.CreateTemp("", "komari-task-*.ps1")
@@ -95,12 +111,14 @@ func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
 			cleanup()
 			return nil, func() {}, err
 		}
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		setupProcessGroup(cmd)
 		return cmd, cleanup, nil
 	} else {
-		cmd = exec.Command("sh", "-s")
+		cmd = exec.CommandContext(ctx, "sh", "-s")
 		cmd.Stdin = strings.NewReader(command)
 	}
+	setupProcessGroup(cmd)
 	return cmd, func() {}, nil
 }
 

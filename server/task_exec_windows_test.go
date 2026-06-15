@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestBuildTaskCommandCreatesPowerShellScriptWindows(t *testing.T) {
-	cmd, cleanup, err := buildTaskCommand("Write-Output 'hello'")
+	cmd, cleanup, err := buildTaskCommand(context.Background(), "Write-Output 'hello'")
 	if err != nil {
 		t.Fatalf("buildTaskCommand returned error: %v", err)
 	}

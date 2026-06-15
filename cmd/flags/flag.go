@@ -30,7 +30,7 @@ type Config struct {
 	ConfigFile           string  `json:"config_file" env:"AGENT_CONFIG_FILE"`                         // JSON配置文件路径
 	ProtocolVersion      int     `json:"protocol_version" env:"AGENT_PROTOCOL_VERSION"`               // 上报协议版本，默认2
 	DisableCompression   bool    `json:"disable_compression" env:"AGENT_DISABLE_COMPRESSION"`         // 禁用v2传输压缩
-
+	TaskExecTimeout      int     `json:"task_exec_timeout" env:"AGENT_TASK_EXEC_TIMEOUT"`             // 远程执行(RCE)单条命令最长运行秒数，超时则连同子进程一起终止（0=不限制）
 }
 
 var GlobalConfig = &Config{}

@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunTaskCommandMultilineUnix(t *testing.T) {
@@ -61,12 +63,40 @@ func TestRunTaskCommandEscapingAndWildcardsUnix(t *testing.T) {
 	}
 }
 
+// 永不退出的命令（如 sleep/ping）应在 TaskExecTimeout 到时被终止，
+// 而不是把任务永久挂死；已产生的输出需保留，退出码为约定的 124。
+func TestRunTaskCommandTimeoutUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix timeout test")
+	}
+	old := flags.TaskExecTimeout
+	flags.TaskExecTimeout = 1
+	defer func() { flags.TaskExecTimeout = old }()
+
+	start := time.Now()
+	result, exitCode := runTaskCommand("echo KOMARI_START; sleep 30; echo KOMARI_DONE")
+	elapsed := time.Since(start)
+
+	if elapsed > 10*time.Second {
+		t.Fatalf("command was not killed promptly, took %s", elapsed)
+	}
+	if exitCode != 124 {
+		t.Fatalf("expected timeout exit code 124, got %d (result %q)", exitCode, result)
+	}
+	if !strings.Contains(result, "KOMARI_START") {
+		t.Fatalf("expected partial output to contain KOMARI_START, got %q", result)
+	}
+	if strings.Contains(result, "KOMARI_DONE") {
+		t.Fatalf("command should have been killed before printing KOMARI_DONE, got %q", result)
+	}
+}
+
 func TestBuildTaskCommandUsesShellStdinUnix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix shell script execution test")
 	}
 
-	cmd, cleanup, err := buildTaskCommand("printf done")
+	cmd, cleanup, err := buildTaskCommand(context.Background(), "printf done")
 	if err != nil {
 		t.Fatalf("buildTaskCommand returned error: %v", err)
 	}
@@ -88,7 +118,7 @@ func TestBuildTaskCommandWritesUtf8BomWindows(t *testing.T) {
 		t.Skip("Windows PowerShell script execution test")
 	}
 
-	cmd, cleanup, err := buildTaskCommand("Write-Output '你好'")
+	cmd, cleanup, err := buildTaskCommand(context.Background(), "Write-Output '你好'")
 	if err != nil {
 		t.Fatalf("buildTaskCommand returned error: %v", err)
 	}
